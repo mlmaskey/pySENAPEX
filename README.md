@@ -1,281 +1,183 @@
-# pySENAPEX — User Manual
+# simAPEX: Calibration, Sensitivity, and Uncertainty Driver
 
-## 1. Overview
-`pysenAPEX` is a Python class for **post-calibration sensitivity analysis** of APEX/APEXgraze model runs.  
-This streamlined version supports:
-- **PBSA** (percent-based sensitivity analysis) heatmaps
-- **SRC** (Standardized Regression Coefficient) analysis
-- No SOBOL or FAST indices
+This repository contains the `simAPEX` driver script and related utilities for running **APEX/APEXgraze** simulations in three modes:
 
-Outputs include:
-- Parameter change vs. metric heatmaps
-- SRC bar plots (first-order and total)
-- CSV tables of metrics, parameter values, and statistical summaries
-- Bulk export of model output variables (daily/annual)
+- **Calibration** – Generate parameter sets, run APEX, and collect performance metrics (PEM).
+- **Sensitivity** – Perturb calibrated parameters to produce datasets for **PBSA** (Percent-Based Sensitivity Analysis) and **SRC** (Standardized Regression Coefficient) analysis.
+- **Uncertainty** – Generate ensembles from within-criteria runs to assess prediction uncertainty.
 
----
+This document describes:
 
-## 2. Requirements
-
-### Python
-- Python 3.8 or higher
-- The following Python packages:
-  - `pandas`
-  - `numpy`
-  - `matplotlib`
-  - `seaborn`
-  - `configobj`
-
-### Utility Modules
-These must be available in your `Utility/` directory:
-- `pyAPEXpost` (with `print_progress_bar`, `pyAPEXpost` class, `get_measure`, `get_stats`, etc.)
-- `apex_utility` (with `read_sensitive_params`, `split_data`)
-- `easypy` (with `get_outlier_na`, `find_change_percent`, `corr_test`)
+1. **Workflow & Modes** (`simAPEX` runbook)
+2. **Inputs, Outputs, and Criteria**
+3. **Algorithm for SRC Calculation** (post-processing sensitivity outputs)
 
 ---
 
-## 3. Input Data & Configuration
+## 1. Workflow & Modes
 
-### Configuration File
-A `runtime.ini` file in the working directory should define:
-```
+### 1.1 Calibration Mode
+1. **Read parameter ranges** from `file_limits` in `src_dir/Utility`.
+2. **Generate parameter sets**:
+   - `isall=True`: sweep all parameters uniformly from min to max.
+   - `isall=False`: sweep only sensitive parameters (`read_sensitive_params`).
+3. **Run loop** for each simulation:
+   - Pick a parameter set (`pick_param`).
+   - Write to APEX inputs (`overwrite_param`, `modify_list`).
+   - Run `APEXgraze.exe` (native or via Wine).
+   - Read outputs: daily, basin, annual.
+   - Calculate PEM metrics (COD, NSE, PBIAS, etc.).
+   - Save run-specific outputs and parameter set to CSV.
 
-dir\_sensitivity = path/to/sensitivity/run/folder
-file\_limits = filename.csv
-Site = site\_name
-Scenario = scenario\_name
-COD\_criteria = 0.5
-NSE\_criteria = 0.5
-PBIAS\_criteria = 25
-max\_range = 5
-warm\_years = 3
-calib\_years = 5
+### 1.2 Sensitivity Mode
+1. **Load calibration results** (`file_pem`, `file_param`).
+2. **Select “best” run** meeting criteria:
+   - COD ≥ `COD_criteria`
+   - NSE ≥ `NSE_criteria`
+   - |PBIAS| ≤ `PBIAS_criteria`
+3. **Build sensitivity matrix**:
+   - Percent deltas: `np.arange(-max_range, max_range+1, increment)`
+   - **Block 1**: All parameters perturbed together.
+   - **Block 2**: One parameter varied at a time.
+4. **Run simulations** for all parameter sets.
+5. **Save outputs** to `OutputSensitivity/`.
 
+### 1.3 Uncertainty Mode
+1. **Select within-criteria runs** from calibration.
+2. **Generate ensembles** using mean ± std for each parameter (bounded to min/max).
+3. **Run simulations** and save outputs to `OutputUncertainty/`.
+
+---
+
+## 2. Inputs & Outputs
+
+### 2.1 Key Inputs
+- **Config file** (`runtime.ini`):
+  - `run_name`, `file_limits`, `n_discrete`, `n_simulation`, `n_start`
+  - Criteria: `COD_criteria`, `NSE_criteria`, `PBIAS_criteria`
+  - Sensitivity/uncertainty: `max_range`, `increment`, `max_range_uncertaintity`, `increment_uncertainty`
+- **Parameter limits file**: `<src_dir>/Utility/<file_limits>`
+- **Calibration results** (for sensitivity/uncertainty):
+  - PEM CSV: `dir_calibrate_res/file_pem`
+  - Parameter CSV: `dir_calibrate_res/file_param`
+
+### 2.2 Outputs per Run
+- **Daily**: `daily_outlet_0000001.csv`, `daily_basin_0000001.csv`
+- **Annual**: `annual_0000001.csv`
+- **Crop-specific splits**
+- **Parameter archives**: `APEXPARM` and `selected_APEXPARM.csv` (sensitivity/uncertainty)
+
+---
+
+## 3. SRC Calculation Algorithm
+
+After **Sensitivity Mode** produces outputs, SRC is calculated in the analysis module (e.g., `senanaAPEX`).  
+
+**Notation:**
+- \( n \) = number of sensitivity runs
+- \( p \) = number of parameters
+- \( X_{i,j} \) = value of parameter \( j \) in run \( i \)
+- \( Y_i \) = performance metric for run \( i \) (e.g., NSE)
+
+---
+
+### 3.1 Steps
+
+**Step 1: Load Data**
+```python
+# X: parameter values (n x p)
+# Y: performance metric (n x 1)
+X, Y = load_sensitivity_data("OutputSensitivity/")
 ````
-> **Note:** `PBIAS_criteria` may also be spelled `PBAIS_criteria`; both are supported.
 
-### Required Files
-- **Limits file**: `<src_dir>/Utility/<file_limits>` — CSV with parameter bounds
-- **Observed data**: `Program/calibration_data.csv`
-- **APEX output statistics**:
-  - `Statistics_runoff.csv` (for attribute `WYLD`)
-  - `Statistics_sediment.csv` (for attribute `YSD`)
-  - `Statistics_<attribute>.csv` (for other attributes)
-- **APEX parameter file**: `APEXPARM.csv` in the `dir_sensitivity` folder
-- **Daily/annual output CSVs**: one per run, e.g.:
-  - `daily_outlet_0000001.csv.csv`
-  - `daily_basin_0000001.csv.csv`
-  - `annual_0000001.csv.csv`
+**Step 2: Standardize**
+
+$$
+Z_{i,j} = \frac{X_{i,j} - \mu_j}{\sigma_j}, \quad Y'_i = \frac{Y_i - \mu_Y}{\sigma_Y}
+$$
+
+Where $\mu_j, \sigma_j$ are mean and std dev of parameter $j$,
+and $\mu_Y, \sigma_Y$ are mean and std dev of $Y$.
+
+**Step 3: Regression**
+
+* **First-order SRC** (one-param-at-a-time block):
+
+$$
+\beta_j = \frac{\text{Cov}(Z_{\cdot,j}, Y')}{\text{Var}(Z_{\cdot,j})}
+$$
+
+* **Total SRC** (all-params block): Fit multiple linear regression:
+
+$$
+Y' = \beta_0 + \sum_{j=1}^{p} \beta_j Z_{\cdot,j} + \epsilon
+$$
+
+Estimate $\beta_j$ using least squares:
+
+$$
+\boldsymbol{\beta} = (Z^\top Z)^{-1} Z^\top Y'
+$$
+
+**Step 4: Output**
+
+* SRC values for each parameter.
+* Use **absolute SRC** for ranking importance.
 
 ---
 
-## 4. How to Run
+### 3.2 Interpretation
+
+* **|SRC| close to 1**: Strong influence on metric.
+* **Positive SRC**: Parameter increase → metric increase.
+* **Negative SRC**: Parameter increase → metric decrease.
+* Compare PBSA (direct percent change effects) vs. SRC (combined regression effects).
+
+---
+
+## 4. Minimal Example Usage
 
 ```python
 from pathlib import Path
 from configobj import ConfigObj
-from senanaAPEX import senanaAPEX  # your class file
+from simAPEX import simAPEX
+from inAPEX import inAPEX
 
-# Load config
-config = ConfigObj('runtime.ini')
+config = ConfigObj("runtime.ini")
+src_dir = Path("/path/to/repo")
+wine = "/usr/bin/wine"  # "" if Windows
 
-# Define paths
-src_dir = Path("/path/to/src_dir")
-out_dir = Path("/path/to/output_folder")
-attribute = "WYLD"  # or "YSD", etc.
+inp = inAPEX(config, src_dir)
 
-# Instantiate and run
-sa = senanaAPEX(src_dir, config, out_dir, attribute, metric='OF')
-````
+# Calibration
+simAPEX(config, src_dir, wine, inp, model_mode="calibration", isall=True)
 
-> The constructor runs the entire analysis and writes outputs to `out_dir`.
+# Sensitivity
+simAPEX(config, src_dir, wine, inp, model_mode="sensitivity", isall=False)
 
----
-
-## 5. Outputs
-
-### Sensitivity Analysis
-
-For each metric (`OF`, `NSE`, `PBIAS`, `COD`):
-
-* **Heatmap PNG**: `Heatmap_<metric>.png`
-* **Heatmap CSV**: `Heatmap-data_<metric>.csv`
-* **SRC Bar Plot PNG**: `Index_<metric>.png`
-* **Parameter Values CSV**: `Param_<metric>.csv`
-* **SRC First-order CSV**: `Index_first_<metric>.csv`
-* **SRC Total CSV**: `Index_Total_<metric>.csv`
-* **Statistical Summary CSV**: `Stat_Summary_<metric>.csv`
-* **Criteria Counts CSV**: `Param_within_<metric>.csv`
-
-### Bulk Output Exports
-
-Daily and annual CSVs for selected variables, e.g.:
-
-* `Daily_WYLD.csv`
-* `Daily_ET.csv`
-* `Annual_YLDG.csv`
-* `Annual_BIOM.csv`
-  (each includes a `Stage` column: Calibration/Validation)
+# Uncertainty
+simAPEX(config, src_dir, wine, inp, model_mode="uncertainty", isall=False)
+```
 
 ---
 
-## 6. Interpreting Results
+## 5. QA Checklist
 
-### Heatmaps
-
-* Rows: % change in parameter value (relative to calibrated value)
-* Columns: Parameters
-* Cell color: % change in performance metric (relative to best run)
-
-### SRC Bar Plots
-
-* **First-order**: direct effect of parameter on metric
-* **Total**: direct + interaction effects
-* **Log-scale** on x-axis to compare small vs. large sensitivities
+* [ ] `runtime.ini` criteria are correct (`COD/NSE/PBIAS`).
+* [ ] `file_limits` has header row (param names) and correct ranges.
+* [ ] Calibration results exist before running sensitivity/uncertainty.
+* [ ] Wine/APEXgraze runs without errors.
+* [ ] Output directories are writeable.
+* [ ] `is_pesticide` matches model setup.
 
 ---
 
-## 7. Notes & Tips
+## 6. Notes
 
-* **Performance**: Large numbers of runs/parameters will slow down analysis.
-* **Parameter Labels**: `PARAM [x]` uses `PARAM_OFFSET = 70` for display; adjust if needed.
-* **Criteria Thresholds**: Used for filtering “good” runs in summaries.
-* **Output Organization**: Each metric’s outputs are grouped by filename pattern.
-
----
-
-## 8. Troubleshooting
-
-* **KeyError**: Check that `runtime.ini` has all required keys.
-* **FileNotFoundError**: Verify all required input files exist in the expected directories.
-* **Blank Heatmap**: Ensure `pe_best[metric]` is non-zero to avoid division by zero.
-
-  Here’s the **SRC computation user manual** in Markdown format, with plotting completely omitted.
-
-
-# Standardized Regression Coefficient (SRC) Computation
-
-This section describes the algorithm for computing **Standardized Regression Coefficients (SRC)** for sensitivity analysis in hydrologic modeling. It covers both **first-order SRC** (per-parameter sweep) and **total SRC** (multiple regression on all parameters).
+* SRC/PBSA **plots** are generated in the analysis phase, not here.
+* Sensitivity block structure is important for correct SRC estimation.
+* Project-specific conventions (e.g., `i <= 69`) should be documented in config or constants.
 
 ---
-
-## 1. Inputs
-
-- **Sweep Data**: For each parameter `p`, a sweep block containing:
-  - `x_p`: parameter `p` values across runs.
-  - `y_p`: corresponding metric values (e.g., OF, NSE).
-- **All-Block Data**:
-  - `df_params_all`: matrix of all parameter values (n × k).
-  - `df_metric_all`: vector of metric values for the same runs.
-- **Parameter Labels**: Names for parameters (e.g., `"CN2 [id-70]"`).
-
----
-
-## 2. First-Order SRC (Per-Parameter Sweep)
-
-### Goal
-Measure the direct sensitivity of the metric to a single parameter, ignoring other parameters.
-
-### Algorithm
-1. **Extract sweep data** for parameter `p`:
-   - `x ← x_p`
-   - `y ← y_p`
-
-2. **Standardize** each vector:
-   - \( \tilde{x}_i = \frac{x_i - \bar{x}}{s_x} \)
-   - \( \tilde{y}_i = \frac{y_i - \bar{y}}{s_y} \)  
-     where \( s_x, s_y \) are the sample standard deviations.
-
-3. **Fit simple linear regression** on standardized data:
-   - Model: \( \tilde{y} = \beta^{(1)}_p \tilde{x} + \epsilon \)
-   - First-order SRC:
-     - \( \mathrm{SRC}^{\text{first}}_p = \beta^{(1)}_p \)
-     - This equals the Pearson correlation between `x` and `y`.
-
-4. **Store result**:
-   - Record `{PARAM: label_p, Order: "First", Method: "SRC", Sensitivity Index: SRC_first_p}`.
-
----
-
-## 3. Total SRC (Multiple Regression on All Parameters)
-
-### Goal
-Measure each parameter’s contribution when all parameters vary together.
-
-### Algorithm
-1. **Prepare input data**:
-   - `X ← df_params_all`
-   - `y ← df_metric_all`
-
-2. **Standardize**:
-   - For each column of `X`:
-     - \( \tilde{X}_{ij} = \frac{X_{ij} - \mu_j}{\sigma_j} \)
-   - For `y`:
-     - \( \tilde{y}_i = \frac{y_i - \mu_y}{\sigma_y} \)
-
-3. **Fit multiple linear regression**:
-   - Model:  
-     \( \tilde{y} = \alpha + \sum_{j=1}^{k} \beta^{(\text{tot})}_j \tilde{X}_j + \epsilon \)
-   - Total SRC for parameter `j`:
-     - \( \mathrm{SRC}^{\text{total}}_j = \beta^{(\text{tot})}_j \)
-
-4. **Store result**:
-   - Record `{PARAM: label_j, Order: "Total", Method: "SRC", Sensitivity Index: SRC_total_j}`.
-
----
-
-## 4. Output Structure
-
-The output table should contain:
-
-| PARAM            | Order  | Method | Sensitivity Index |
-|------------------|--------|--------|-------------------|
-| CN2 [id-70]      | First  | SRC    | 0.45              |
-| CN2 [id-70]      | Total  | SRC    | 0.38              |
-| ALPHA_BF [id-45] | First  | SRC    | -0.22             |
-| ALPHA_BF [id-45] | Total  | SRC    | -0.10             |
-
----
-
-## 5. Sanity Checks
-
-- Standardization uses **sample** standard deviation (`ddof=1`).
-- Remove outliers from `y` before regression if necessary.
-- Ensure no NaNs remain after preprocessing.
-- Interpret the **sign** of SRC:
-  - Positive → increase in parameter increases metric.
-  - Negative → increase in parameter decreases metric.
-
----
-
-## 6. Pseudocode
-
-```text
-# FIRST-ORDER SRC
-for p in parameters:
-    x = sweep_values[p]
-    y = metric_values[p]
-    xz = standardize(x)
-    yz = standardize(y)
-    beta_first = OLS_slope(yz ~ xz)   # equals corr(x, y)
-    store(PARAM=p_label, Order="First", SRC=beta_first)
-
-# TOTAL SRC
-X = params_all_block
-y = metric_all_block
-Xz = standardize_columns(X)
-yz = standardize(y)
-beta_totals = OLS_coefficients(yz ~ Xz + intercept)
-for j, p in enumerate(parameters):
-    store(PARAM=p_label, Order="Total", SRC=beta_totals[j])
-````
-
----
-
-## 7. Notes
-
-* **First-order SRC**: Simple, interpretable, but ignores interactions.
-* **Total SRC**: Captures partial effects in a linear model with all parameters included.
-* SRC values are **unitless** and comparable across parameters.
 
 ```
