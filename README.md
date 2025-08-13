@@ -149,3 +149,133 @@ Daily and annual CSVs for selected variables, e.g.:
 * **KeyError**: Check that `runtime.ini` has all required keys.
 * **FileNotFoundError**: Verify all required input files exist in the expected directories.
 * **Blank Heatmap**: Ensure `pe_best[metric]` is non-zero to avoid division by zero.
+
+  Here’s the **SRC computation user manual** in Markdown format, with plotting completely omitted.
+
+
+# Standardized Regression Coefficient (SRC) Computation
+
+This section describes the algorithm for computing **Standardized Regression Coefficients (SRC)** for sensitivity analysis in hydrologic modeling. It covers both **first-order SRC** (per-parameter sweep) and **total SRC** (multiple regression on all parameters).
+
+---
+
+## 1. Inputs
+
+- **Sweep Data**: For each parameter `p`, a sweep block containing:
+  - `x_p`: parameter `p` values across runs.
+  - `y_p`: corresponding metric values (e.g., OF, NSE).
+- **All-Block Data**:
+  - `df_params_all`: matrix of all parameter values (n × k).
+  - `df_metric_all`: vector of metric values for the same runs.
+- **Parameter Labels**: Names for parameters (e.g., `"CN2 [id-70]"`).
+
+---
+
+## 2. First-Order SRC (Per-Parameter Sweep)
+
+### Goal
+Measure the direct sensitivity of the metric to a single parameter, ignoring other parameters.
+
+### Algorithm
+1. **Extract sweep data** for parameter `p`:
+   - `x ← x_p`
+   - `y ← y_p`
+
+2. **Standardize** each vector:
+   - \( \tilde{x}_i = \frac{x_i - \bar{x}}{s_x} \)
+   - \( \tilde{y}_i = \frac{y_i - \bar{y}}{s_y} \)  
+     where \( s_x, s_y \) are the sample standard deviations.
+
+3. **Fit simple linear regression** on standardized data:
+   - Model: \( \tilde{y} = \beta^{(1)}_p \tilde{x} + \epsilon \)
+   - First-order SRC:
+     - \( \mathrm{SRC}^{\text{first}}_p = \beta^{(1)}_p \)
+     - This equals the Pearson correlation between `x` and `y`.
+
+4. **Store result**:
+   - Record `{PARAM: label_p, Order: "First", Method: "SRC", Sensitivity Index: SRC_first_p}`.
+
+---
+
+## 3. Total SRC (Multiple Regression on All Parameters)
+
+### Goal
+Measure each parameter’s contribution when all parameters vary together.
+
+### Algorithm
+1. **Prepare input data**:
+   - `X ← df_params_all`
+   - `y ← df_metric_all`
+
+2. **Standardize**:
+   - For each column of `X`:
+     - \( \tilde{X}_{ij} = \frac{X_{ij} - \mu_j}{\sigma_j} \)
+   - For `y`:
+     - \( \tilde{y}_i = \frac{y_i - \mu_y}{\sigma_y} \)
+
+3. **Fit multiple linear regression**:
+   - Model:  
+     \( \tilde{y} = \alpha + \sum_{j=1}^{k} \beta^{(\text{tot})}_j \tilde{X}_j + \epsilon \)
+   - Total SRC for parameter `j`:
+     - \( \mathrm{SRC}^{\text{total}}_j = \beta^{(\text{tot})}_j \)
+
+4. **Store result**:
+   - Record `{PARAM: label_j, Order: "Total", Method: "SRC", Sensitivity Index: SRC_total_j}`.
+
+---
+
+## 4. Output Structure
+
+The output table should contain:
+
+| PARAM            | Order  | Method | Sensitivity Index |
+|------------------|--------|--------|-------------------|
+| CN2 [id-70]      | First  | SRC    | 0.45              |
+| CN2 [id-70]      | Total  | SRC    | 0.38              |
+| ALPHA_BF [id-45] | First  | SRC    | -0.22             |
+| ALPHA_BF [id-45] | Total  | SRC    | -0.10             |
+
+---
+
+## 5. Sanity Checks
+
+- Standardization uses **sample** standard deviation (`ddof=1`).
+- Remove outliers from `y` before regression if necessary.
+- Ensure no NaNs remain after preprocessing.
+- Interpret the **sign** of SRC:
+  - Positive → increase in parameter increases metric.
+  - Negative → increase in parameter decreases metric.
+
+---
+
+## 6. Pseudocode
+
+```text
+# FIRST-ORDER SRC
+for p in parameters:
+    x = sweep_values[p]
+    y = metric_values[p]
+    xz = standardize(x)
+    yz = standardize(y)
+    beta_first = OLS_slope(yz ~ xz)   # equals corr(x, y)
+    store(PARAM=p_label, Order="First", SRC=beta_first)
+
+# TOTAL SRC
+X = params_all_block
+y = metric_all_block
+Xz = standardize_columns(X)
+yz = standardize(y)
+beta_totals = OLS_coefficients(yz ~ Xz + intercept)
+for j, p in enumerate(parameters):
+    store(PARAM=p_label, Order="Total", SRC=beta_totals[j])
+````
+
+---
+
+## 7. Notes
+
+* **First-order SRC**: Simple, interpretable, but ignores interactions.
+* **Total SRC**: Captures partial effects in a linear model with all parameters included.
+* SRC values are **unitless** and comparable across parameters.
+
+```
