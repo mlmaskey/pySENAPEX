@@ -1,4 +1,4 @@
-# simAPEX: Calibration, Sensitivity, and Uncertainty Driver
+# pyAPEXSCU: Calibration, Sensitivity, and Uncertainty Driver
 
 ## Quick Run: Post-Calibration Sensitivity Analysis
 
